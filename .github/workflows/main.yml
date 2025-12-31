@@ -12,7 +12,7 @@ jobs:
         run: pip install requests google-generativeai
       - name: Pokretanje bota
         env:
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          WP_USERNAME: ${{ secrets.WP_USERNAME }}
-          WP_APP_PASSWORD: ${{ secrets.WP_APP_PASSWORD }}
+          GEMINI_API_KEY: ${{ secrets.AIzaSyB2D7jNlfcyJJbry6AMFQTOqG1UomhdfRc }}
+          WP_USERNAME: ${{ secrets.aibot }}
+          WP_APP_PASSWORD: ${{ secrets.UXWxtBla3Qm(utb3wG!9xsnh }}
         run: python bot.py
