@@ -3,190 +3,159 @@ import requests
 import json
 import time
 import sys
+import base64
 
 # --- CONFIG ---
 WP_USER = os.environ.get("WP_USERNAME")
 WP_PASS = os.environ.get("WP_APP_PASSWORD")
 WP_URL = "https://sokobanja.org.rs/wp-json/wp/v2"
-
-# API endpoints vaseg React Portala
 API_BASE = "https://portal.sokobanja.org.rs/api"
-GET_LATEST_URL = f"{API_BASE}/get_latest.php"
-QUEUE_URL = f"{API_BASE}/queue.php"
 
-# --- STEALTH HEADERS ---
+# --- HEADERS ---
 COMMON_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    "Accept-Language": "en-US,en;q=0.9",
-    "Connection": "keep-alive"
+    "Accept": "application/json"
 }
+
+# Globalna promenljiva za Auth Header (moze se promeniti tokom rada)
+AUTH_HEADERS = {} 
 
 def log(msg):
     print(f"[BOT] {msg}")
     sys.stdout.flush()
 
-def check_wp_auth():
-    log("🔧 0. DIAGNOSTICS: Checking WordPress Connection...")
+def setup_auth():
+    """Pokusava da nadje pravu auth metodu (Standard ili Bypass)"""
+    global AUTH_HEADERS
     
     if not WP_USER or not WP_PASS:
-        log("❌ CRITICAL: Secrets (WP_USERNAME ili WP_APP_PASSWORD) nedostaju u GitHub Settings!")
+        log("❌ CRITICAL: Nema WP credencijala!")
         return False
         
-    # Maskirana lozinka za debug
-    pass_len = len(WP_PASS) if WP_PASS else 0
-    masked = "*" * pass_len
-    log(f"   User: {WP_USER}")
-    log(f"   Pass Length: {pass_len} chars")
-
-    url = f"{WP_URL}/users/me"
+    # Priprema Basic Auth stringa
+    token = base64.b64encode(f"{WP_USER}:{WP_PASS}".encode()).decode()
+    auth_val = f"Basic {token}"
+    
+    # 1. TEST STANDARDNOG AUTHA
+    log("🔑 Testiram Standardni Auth...")
     try:
-        resp = requests.get(url, auth=(WP_USER, WP_PASS), headers=COMMON_HEADERS, timeout=15)
+        test_headers = COMMON_HEADERS.copy()
+        test_headers["Authorization"] = auth_val
+        
+        resp = requests.get(f"{WP_URL}/users/me", headers=test_headers, timeout=10)
         
         if resp.status_code == 200:
-            user = resp.json()
-            log(f"✅ AUTH SUCCESS! Ulogovan kao: {user.get('name')}")
+            log("✅ Standardni Auth RADI!")
+            AUTH_HEADERS = test_headers
             return True
-        elif resp.status_code == 401:
-            log(f"⛔ AUTH FAILED (401). Lozinka je stigla do servera ali je odbijena ili obrisana.")
-            log("   AKCIJA: Proverite da li ste ubacili 'Restore Authorization Header' kod u WPCode plugin (Tab 8).")
-            return False
-        elif resp.status_code == 403:
-            log(f"⛔ FORBIDDEN (403). Wordfence ili firewall blokira.")
-            return False
         else:
-            log(f"⚠️ HTTP ERROR {resp.status_code}: {resp.text[:100]}")
-            return False
+            log(f"⚠️ Standardni Auth odbijen ({resp.status_code}).")
     except Exception as e:
-        log(f"❌ CONNECTION ERROR: {str(e)}")
+        log(f"⚠️ Greska pri standardnom authu: {e}")
+
+    # 2. TEST BYPASS AUTHA (X-WP-Auth)
+    log("🛡️ Pokrecem 'Silver Bullet' Bypass (X-WP-Auth)...")
+    try:
+        bypass_headers = COMMON_HEADERS.copy()
+        # Saljemo lozinku u nasem custom headeru koga server nece obrisati
+        bypass_headers["X-WP-Auth"] = auth_val 
+        
+        resp = requests.get(f"{WP_URL}/users/me", headers=bypass_headers, timeout=10)
+        
+        if resp.status_code == 200:
+            log("✅ BYPASS AUTH RADI! Koristimo tajni kanal.")
+            AUTH_HEADERS = bypass_headers
+            return True
+        else:
+            log(f"❌ I Bypass Auth je odbijen ({resp.status_code}).")
+            log(f"   Response: {resp.text[:100]}")
+            return False
+            
+    except Exception as e:
+        log(f"❌ Greska pri bypass authu: {e}")
         return False
 
 def get_latest_news():
-    log(f"📥 1. Dohvatam vesti sa: {GET_LATEST_URL}")
+    log(f"📥 Dohvatam vesti iz reda: {API_BASE}/get_latest.php")
     try:
-        resp = requests.get(GET_LATEST_URL, headers=COMMON_HEADERS, timeout=30)
+        resp = requests.get(f"{API_BASE}/get_latest.php", headers=COMMON_HEADERS, timeout=30)
+        if resp.status_code != 200: return None
         
-        if resp.status_code != 200:
-            log(f"❌ API Error {resp.status_code}")
-            return None
-
-        text = resp.text.strip()
-        if text.startswith('\ufeff'): text = text[1:]
-            
         try:
-            data = json.loads(text)
-        except json.JSONDecodeError:
-            log(f"❌ JSON PARSE ERROR.")
-            return None
-        
-        if "id" not in data:
-            if "message" in data: log(f"ℹ️ Info: {data['message']}")
-            return None
+            data = resp.json()
+        except: return None
             
-        log(f"   -> Nasao vest ID: {data['id']} - {data.get('title')}")
-        return data
-    except Exception as e:
-        log(f"❌ FETCH ERROR: {e}")
+        if "id" in data:
+            log(f"   -> Nasao vest ID: {data['id']}")
+            return data
         return None
-
-def find_category_id(category_name="Vesti"):
-    log(f"🔎 2. Trazim ID Kategorije '{category_name}'...")
-    try:
-        resp = requests.get(
-            f"{WP_URL}/categories?search={category_name}", 
-            auth=(WP_USER, WP_PASS),
-            headers=COMMON_HEADERS,
-            timeout=10
-        )
-        if resp.status_code == 200:
-            cats = resp.json()
-            if cats and len(cats) > 0:
-                return cats[0]['id']
-    except Exception:
-        pass
-    return 1 
+    except: return None
 
 def upload_image(image_url):
     if not image_url: return None
-    log(f"🖼️ 3. Obradjujem sliku: {image_url}")
+    log(f"🖼️ Uploadujem sliku...")
     try:
         img_resp = requests.get(image_url, headers=COMMON_HEADERS, timeout=30)
         if img_resp.status_code != 200: return None
-            
+        
         filename = f"ai_news_{int(time.time())}.png"
-        media_headers = COMMON_HEADERS.copy()
-        media_headers["Content-Type"] = "image/png"
-        media_headers["Content-Disposition"] = f"attachment; filename={filename}"
         
-        wp_resp = requests.post(
-            f"{WP_URL}/media",
-            data=img_resp.content,
-            headers=media_headers,
-            auth=(WP_USER, WP_PASS),
-            timeout=30
-        )
+        # Kombinujemo Auth headers sa Image headers
+        headers = {**AUTH_HEADERS, **COMMON_HEADERS}
+        headers["Content-Type"] = "image/png"
+        headers["Content-Disposition"] = f"attachment; filename={filename}"
         
-        if wp_resp.status_code == 201:
-            return wp_resp.json().get('id')
+        resp = requests.post(f"{WP_URL}/media", data=img_resp.content, headers=headers, timeout=30)
+        
+        if resp.status_code == 201:
+            return resp.json().get('id')
         return None
-    except Exception:
-        return None
+    except: return None
 
-def post_article(news_item):
-    if not check_wp_auth():
-        log("🛑 PREKIDAM: Autentifikacija nije prosla.")
-        sys.exit(1)
-
-    title = news_item.get('title', 'Info')
-    content = news_item.get('content', '')
-    news_id = news_item.get('id')
-    image_url = news_item.get('image_url')
-
-    cat_id = find_category_id("Vesti") 
-    media_id = upload_image(image_url)
-
+def post_article(news):
+    title = news.get('title')
+    
+    # 1. Upload slike
+    media_id = upload_image(news.get('image_url'))
+    
+    # 2. Kreiranje posta
+    log("🚀 Objavljujem clanak...")
     post_data = {
         'title': title,
-        'content': content,
-        'status': 'publish', 
-        'categories': [cat_id] 
+        'content': news.get('content'),
+        'status': 'publish',
+        'categories': [1] # Default ID
     }
-    if media_id:
-        post_data['featured_media'] = media_id
-
-    log("🚀 4. Objavljujem clanak na WordPress...")
-    post_headers = COMMON_HEADERS.copy()
-    post_headers["Content-Type"] = "application/json"
-
-    try:
-        resp = requests.post(
-            f"{WP_URL}/posts",
-            json=post_data,
-            auth=(WP_USER, WP_PASS),
-            headers=post_headers,
-            timeout=30
-        )
-
-        if resp.status_code == 201:
-            link = resp.json().get('link')
-            log(f"✅ USPEH! Objavljeno na: {link}")
-            
-            log(f"🗑️ 5. Brisem vest {news_id} iz reda...")
-            try:
-                requests.post(QUEUE_URL, json={"action": "delete", "id": int(news_id)}, headers=post_headers, timeout=10)
-            except: pass
-            return True
-        else:
-            log(f"❌ PUBLISH FAILED: {resp.status_code}")
-            sys.exit(1)
-
-    except Exception as e:
-        log(f"❌ POST EXCEPTION: {e}")
-        sys.exit(1)
+    if media_id: post_data['featured_media'] = media_id
+    
+    headers = {**AUTH_HEADERS, **COMMON_HEADERS}
+    
+    resp = requests.post(f"{WP_URL}/posts", json=post_data, headers=headers)
+    
+    if resp.status_code == 201:
+        log("✅ USPEH! Vest objavljena.")
+        # Brisanje iz reda
+        try:
+            requests.post(f"{API_BASE}/queue.php", json={"action":"delete", "id":int(news['id'])}, headers=COMMON_HEADERS)
+            log("🗑️ Obrisano iz reda.")
+        except: pass
+        return True
+    else:
+        log(f"❌ Greska pri objavi: {resp.status_code}")
+        log(resp.text[:200])
+        return False
 
 if __name__ == "__main__":
-    print("--- 🤖 SOKOBANJA BOT v4.1 (Header Restore Check) ---")
+    print("--- 🤖 SOKOBANJA BOT v4.2 (Silver Bullet) ---")
+    
+    # 1. Prvo auth check
+    if not setup_auth():
+        print("❌ Ne mogu da se ulogujem. Proverite WPCode snippet.")
+        sys.exit(1)
+        
+    # 2. Onda posao
     news = get_latest_news()
     if news:
         post_article(news)
     else:
-        print("--- 💤 NEMA NOVIH VESTI ---")
+        print("--- 💤 Nema vesti ---")
