@@ -4,7 +4,6 @@ import json
 import time
 
 # --- CONFIG ---
-# Ovi podaci se citaju iz GitHub Secrets
 WP_USER = os.environ.get("WP_USERNAME")
 WP_PASS = os.environ.get("WP_APP_PASSWORD")
 WP_URL = "https://sokobanja.org.rs/wp-json/wp/v2"
@@ -16,16 +15,23 @@ QUEUE_URL = f"{API_BASE}/queue.php"
 
 def get_latest_news():
     try:
-        print("1. Trazim vesti na cekanju...")
+        print("1. Trazim vesti na cekanju (u Redu/Queue)...")
+        print(f"   -> URL: {GET_LATEST_URL}")
+        
         resp = requests.get(GET_LATEST_URL, timeout=30)
+        print(f"   -> SERVER ODGOVOR (Raw): {resp.text[:200]}") # Prikazi prvih 200 karaktera odgovora
+        
         try:
             data = resp.json()
         except:
-            print(f"Greska u JSON formatu: {resp.text[:100]}")
+            print(f"   -> GRESKA: Server nije vratio validan JSON.")
             return None
         
         if "id" not in data:
-            print("Nema novih vesti na cekanju.")
+            print("----------------------------------------------------------------")
+            print("VAZNO: Nema novih vesti na cekanju (Queue je prazan).")
+            print("AKCIJA: Idite na portal.sokobanja.org.rs, generisite vest i kliknite 'Sacuvaj za Auto-Pilot'.")
+            print("----------------------------------------------------------------")
             return None
             
         return data
@@ -33,11 +39,35 @@ def get_latest_news():
         print(f"Greska pri dohvatanju vesti: {e}")
         return None
 
+def find_category_id(category_name="Vesti"):
+    """
+    Pokusava da nadje ID kategorije na osnovu imena.
+    Ako ne nadje, vraca 1 (Default).
+    """
+    print(f"2. Trazim ID za kategoriju: '{category_name}'...")
+    try:
+        resp = requests.get(f"{WP_URL}/categories?search={category_name}", auth=(WP_USER, WP_PASS))
+        if resp.status_code == 200:
+            cats = resp.json()
+            if cats and len(cats) > 0:
+                cat_id = cats[0]['id']
+                print(f"   -> Pronadjena kategorija '{cats[0]['name']}' sa ID: {cat_id}")
+                return cat_id
+            else:
+                print(f"   -> Kategorija '{category_name}' nije pronadjena. Koristim default ID: 1")
+                return 1
+        else:
+             print(f"   -> Greska pri trazenju kategorije: {resp.status_code}. Koristim default ID: 1")
+             return 1
+    except Exception as e:
+        print(f"   -> Exception pri trazenju kategorije: {e}. Koristim default ID: 1")
+        return 1
+
 def upload_image_to_wp(image_url):
     if not image_url: return None
     
     try:
-        print(f"2. Preuzimam sliku: {image_url}")
+        print(f"3. Preuzimam sliku: {image_url}")
         img_resp = requests.get(image_url)
         if img_resp.status_code != 200:
             print("Neuspesno preuzimanje slike.")
@@ -49,7 +79,7 @@ def upload_image_to_wp(image_url):
             "Content-Disposition": f"attachment; filename={filename}"
         }
         
-        print("3. Saljem sliku na WordPress...")
+        print("4. Saljem sliku na WordPress...")
         wp_resp = requests.post(
             f"{WP_URL}/media",
             data=img_resp.content,
@@ -78,23 +108,26 @@ def post_article(news_item):
     news_id = news_item.get('id')
     image_url = news_item.get('image_url')
 
-    # 1. Upload slike (ako postoji)
+    # Pronadji pravu kategoriju
+    cat_id = find_category_id("Vesti") 
+
+    # Upload slike (ako postoji)
     media_id = None
     if image_url:
         media_id = upload_image_to_wp(image_url)
 
-    # 2. Kreiranje posta
+    # Kreiranje posta
     post_data = {
         'title': title,
         'content': content,
         'status': 'publish', 
-        'categories': [1] # ID kategorije 'Vesti', promenite po potrebi
+        'categories': [cat_id] 
     }
     
     if media_id:
         post_data['featured_media'] = media_id
 
-    print("4. Objavljujem clanak na WP...")
+    print("5. Objavljujem clanak na WP...")
     resp = requests.post(
         f"{WP_URL}/posts",
         json=post_data,
@@ -105,8 +138,8 @@ def post_article(news_item):
         link = resp.json().get('link')
         print(f"✅ USPEH! Clanak objavljen: {link}")
         
-        # 3. Mark as Done
-        print("5. Azuriram status u redu cekanja...")
+        # Mark as Done
+        print("6. Azuriram status u redu cekanja...")
         status_resp = requests.post(QUEUE_URL, json={
             "action": "update_status",
             "id": news_id,
@@ -119,11 +152,11 @@ def post_article(news_item):
         return False
 
 if __name__ == "__main__":
-    print("--- SOKOBANJA BOT STARTED ---")
+    print("--- SOKOBANJA BOT STARTED (DEBUG MODE) ---")
     news = get_latest_news()
     if news:
         print(f"Pronadjena vest: {news.get('title')} (ID: {news.get('id')})")
         post_article(news)
     else:
-        print("Kraj: Nema vesti.")
+        print("--- NISTA NIJE URADJENO (Procitaj logove iznad) ---")
     print("--- END ---")
