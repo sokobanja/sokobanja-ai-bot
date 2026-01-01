@@ -14,11 +14,17 @@ API_BASE = "https://portal.sokobanja.org.rs/api"
 GET_LATEST_URL = f"{API_BASE}/get_latest.php"
 QUEUE_URL = f"{API_BASE}/queue.php"
 
-# Headeri su kljucni da ne budemo blokirani
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+# HEADER 1: Za API pozive (Mora biti JSON)
+JSON_HEADERS = {
+    "User-Agent": "SokoBot/3.3",
     "Accept": "application/json",
     "Content-Type": "application/json"
+}
+
+# HEADER 2: Za skidanje slika (Mora biti kao Browser da ne dobijemo 403)
+BROWSER_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Accept": "*/*"
 }
 
 def log(msg):
@@ -27,18 +33,16 @@ def log(msg):
 def get_latest_news():
     log(f"1. Dohvatam vesti sa: {GET_LATEST_URL}")
     try:
-        resp = requests.get(GET_LATEST_URL, headers=HEADERS, timeout=30)
+        resp = requests.get(GET_LATEST_URL, headers=JSON_HEADERS, timeout=30)
         
         if resp.status_code != 200:
             log(f"CRITICAL: API Error {resp.status_code}")
-            log(f"Response: {resp.text[:200]}")
             sys.exit(1)
 
         try:
             data = resp.json()
         except Exception:
-            log(f"CRITICAL: API nije vratio JSON! Sadrzaj:")
-            log(resp.text[:500])
+            log(f"CRITICAL: API nije vratio JSON! Sadrzaj: {resp.text[:100]}")
             sys.exit(1)
         
         if "id" not in data:
@@ -58,7 +62,7 @@ def find_category_id(category_name="Vesti"):
         resp = requests.get(
             f"{WP_URL}/categories?search={category_name}", 
             auth=(WP_USER, WP_PASS),
-            headers=HEADERS
+            headers=JSON_HEADERS
         )
         if resp.status_code == 200:
             cats = resp.json()
@@ -74,15 +78,16 @@ def upload_image_to_wp(image_url):
     if not image_url: return None
     log(f"3. Uploadujem sliku: {image_url}")
     try:
-        # 1. Download
-        img_resp = requests.get(image_url, headers=HEADERS)
+        # 1. Download (Koristimo BROWSER_HEADERS da izbegnemo 403)
+        img_resp = requests.get(image_url, headers=BROWSER_HEADERS)
         if img_resp.status_code != 200:
             log(f"   -> Download failed: {img_resp.status_code}")
+            # Ne prekidamo, objavicemo vest bez slike
             return None
             
         # 2. Upload to WP
         filename = f"ai_gen_{int(time.time())}.png"
-        wp_headers = HEADERS.copy()
+        wp_headers = JSON_HEADERS.copy()
         wp_headers["Content-Type"] = "image/png"
         wp_headers["Content-Disposition"] = f"attachment; filename={filename}"
         
@@ -131,7 +136,7 @@ def post_article(news_item):
         f"{WP_URL}/posts",
         json=post_data,
         auth=(WP_USER, WP_PASS),
-        headers=HEADERS
+        headers=JSON_HEADERS
     )
 
     if resp.status_code == 201:
@@ -139,27 +144,26 @@ def post_article(news_item):
         log(f"✅ USPEH! Objavljeno na: {link}")
         
         log(f"5. Brisem vest ID {news_id} iz reda...")
-        
-        # FIX: Ensure ID is integer or string consistently
         del_payload = {"action": "delete", "id": int(news_id)}
-        
-        del_resp = requests.post(QUEUE_URL, json=del_payload, headers=HEADERS)
+        del_resp = requests.post(QUEUE_URL, json=del_payload, headers=JSON_HEADERS)
         
         if del_resp.status_code == 200:
-             log(f"   -> Obrisano iz reda. Server kaze: {del_resp.text}")
+             log(f"   -> Obrisano iz reda.")
         else:
              log(f"⚠️ GRESKA PRI BRISANJU IZ REDA: {del_resp.status_code}")
-             log(f"   -> {del_resp.text}")
-             # Ne izlazimo sa greskom jer je vest objavljena, ali upozoravamo
         
         return True
     else:
         log(f"❌ WP POST ERROR {resp.status_code}")
         log(f"   -> {resp.text}")
+        
+        if resp.status_code == 401:
+            log("SAVET: Proverite .htaccess fajl na GLAVNOM WordPress sajtu! Dodajte: RewriteRule .* - [E=HTTP_AUTHORIZATION:%{HTTP:Authorization}]")
+            
         sys.exit(1) # OBAVEZNO FAILUJ ACTION
 
 if __name__ == "__main__":
-    print("--- SOKOBANJA BOT v3.2 (ULTRA DEBUG) ---")
+    print("--- SOKOBANJA BOT v3.3 (ROBUST HEADERS) ---")
     news = get_latest_news()
     if news:
         post_article(news)
