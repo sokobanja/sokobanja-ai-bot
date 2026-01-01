@@ -14,46 +14,46 @@ API_BASE = "https://portal.sokobanja.org.rs/api"
 GET_LATEST_URL = f"{API_BASE}/get_latest.php"
 QUEUE_URL = f"{API_BASE}/queue.php"
 
-# VAZNO: Headeri da imitiramo pravi pretrazivac
+# Headeri su kljucni da ne budemo blokirani
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    "Accept": "application/json"
+    "Accept": "application/json",
+    "Content-Type": "application/json"
 }
 
 def log(msg):
     print(f"[BOT] {msg}")
 
 def get_latest_news():
-    log("1. Trazim vesti na cekanju...")
+    log(f"1. Dohvatam vesti sa: {GET_LATEST_URL}")
     try:
         resp = requests.get(GET_LATEST_URL, headers=HEADERS, timeout=30)
         
         if resp.status_code != 200:
-            log(f"CRITICAL: Server returned status {resp.status_code}")
-            log(f"Response: {resp.text[:500]}")
-            sys.exit(1) # Forsiraj gresku u Action-u
+            log(f"CRITICAL: API Error {resp.status_code}")
+            log(f"Response: {resp.text[:200]}")
+            sys.exit(1)
 
         try:
             data = resp.json()
         except Exception:
-            log(f"CRITICAL: Ne mogu da parsiram JSON. Server je vratio:")
+            log(f"CRITICAL: API nije vratio JSON! Sadrzaj:")
             log(resp.text[:500])
             sys.exit(1)
         
         if "id" not in data:
             if "message" in data:
                  log(f"Info: {data['message']}")
-            else:
-                 log(f"Info: Prazan odgovor ili nema 'id' polja. Response: {data}")
             return None
             
+        log(f"   -> Nasao vest ID: {data['id']} - {data.get('title')}")
         return data
     except Exception as e:
         log(f"CRITICAL NETWORK ERROR: {e}")
         sys.exit(1)
 
 def find_category_id(category_name="Vesti"):
-    log(f"2. Trazim ID za kategoriju: '{category_name}'...")
+    log(f"2. Trazim WP kategoriju: '{category_name}'")
     try:
         resp = requests.get(
             f"{WP_URL}/categories?search={category_name}", 
@@ -63,20 +63,24 @@ def find_category_id(category_name="Vesti"):
         if resp.status_code == 200:
             cats = resp.json()
             if cats and len(cats) > 0:
+                log(f"   -> Kategorija nadjena: {cats[0]['id']}")
                 return cats[0]['id']
-    except:
-        pass
-    return 1
+    except Exception as e:
+        log(f"Warning (Category): {e}")
+    
+    return 1 # Fallback ID
 
 def upload_image_to_wp(image_url):
     if not image_url: return None
-    log(f"3. Uploadujem sliku na WP: {image_url}")
+    log(f"3. Uploadujem sliku: {image_url}")
     try:
+        # 1. Download
         img_resp = requests.get(image_url, headers=HEADERS)
         if img_resp.status_code != 200:
-            log(f"Greska pri downloadu slike: {img_resp.status_code}")
+            log(f"   -> Download failed: {img_resp.status_code}")
             return None
             
+        # 2. Upload to WP
         filename = f"ai_gen_{int(time.time())}.png"
         wp_headers = HEADERS.copy()
         wp_headers["Content-Type"] = "image/png"
@@ -90,25 +94,25 @@ def upload_image_to_wp(image_url):
         )
         
         if wp_resp.status_code == 201:
-            return wp_resp.json().get('id')
+            media_id = wp_resp.json().get('id')
+            log(f"   -> Slika uploadovana! ID: {media_id}")
+            return media_id
         
-        log(f"WP Media Upload Failed: {wp_resp.text}")
+        log(f"   -> WP Upload Failed: {wp_resp.status_code} - {wp_resp.text[:200]}")
         return None
     except Exception as e:
-        log(f"Media Exception: {e}")
+        log(f"Media Error: {e}")
         return None
 
 def post_article(news_item):
     if not WP_USER or not WP_PASS:
-        log("CRITICAL: Nedostaju WP tajne (Secrets)!")
+        log("CRITICAL: Nema WP lozinke u Secrets!")
         sys.exit(1)
 
-    title = news_item.get('title', 'Sokobanja Info')
+    title = news_item.get('title', 'Info')
     content = news_item.get('content', '')
     news_id = news_item.get('id')
     image_url = news_item.get('image_url')
-
-    log(f"Pripremam objavu: {title}")
 
     cat_id = find_category_id("Vesti") 
     media_id = upload_image_to_wp(image_url)
@@ -122,7 +126,7 @@ def post_article(news_item):
     if media_id:
         post_data['featured_media'] = media_id
 
-    log("4. Saljem post na WP...")
+    log("4. Saljem post na WP API...")
     resp = requests.post(
         f"{WP_URL}/posts",
         json=post_data,
@@ -132,20 +136,30 @@ def post_article(news_item):
 
     if resp.status_code == 201:
         link = resp.json().get('link')
-        log(f"✅ USPEH! Link: {link}")
+        log(f"✅ USPEH! Objavljeno na: {link}")
         
-        log("5. Brisem iz reda...")
-        del_resp = requests.post(QUEUE_URL, json={"action": "delete", "id": news_id}, headers=HEADERS)
-        if del_resp.status_code != 200:
-             log(f"WARNING: Nisam uspeo da obrisem iz reda. Status: {del_resp.status_code}")
+        log(f"5. Brisem vest ID {news_id} iz reda...")
+        
+        # FIX: Ensure ID is integer or string consistently
+        del_payload = {"action": "delete", "id": int(news_id)}
+        
+        del_resp = requests.post(QUEUE_URL, json=del_payload, headers=HEADERS)
+        
+        if del_resp.status_code == 200:
+             log(f"   -> Obrisano iz reda. Server kaze: {del_resp.text}")
+        else:
+             log(f"⚠️ GRESKA PRI BRISANJU IZ REDA: {del_resp.status_code}")
+             log(f"   -> {del_resp.text}")
+             # Ne izlazimo sa greskom jer je vest objavljena, ali upozoravamo
         
         return True
     else:
-        log(f"❌ WP ERROR {resp.status_code}: {resp.text}")
-        sys.exit(1) # Forsiraj gresku
+        log(f"❌ WP POST ERROR {resp.status_code}")
+        log(f"   -> {resp.text}")
+        sys.exit(1) # OBAVEZNO FAILUJ ACTION
 
 if __name__ == "__main__":
-    print("--- SOKOBANJA BOT v3.1 (STRICT DEBUG MODE) ---")
+    print("--- SOKOBANJA BOT v3.2 (ULTRA DEBUG) ---")
     news = get_latest_news()
     if news:
         post_article(news)
